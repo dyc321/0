@@ -1083,7 +1083,68 @@ VUECODE
 PKG
         npm install
     fi
-    
+        # ====== 关键：补齐 Vite 必需入口文件（否则 vite build 找不到 index.html）======
+    # 1) vite.config.js：让 Vite 支持 .vue，并把 /api 代理到后端
+    if [ ! -f "${FE_DIR}/vite.config.js" ]; then
+        cat > "${FE_DIR}/vite.config.js" <<'JS'
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  server: {
+    host: '0.0.0.0',
+    port: 5173,
+    proxy: {
+      '/api': 'http://127.0.0.1:8000'
+    }
+  },
+  build: { outDir: 'dist' }
+})
+JS
+    fi
+
+    # 2) index.html：Vite 默认入口必须存在于 frontend 根目录
+    if [ ! -f "${FE_DIR}/index.html" ]; then
+        cat > "${FE_DIR}/index.html" <<'HTML'
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>开发板管理系统</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
+HTML
+    fi
+
+    # 3) src/main.js：Vue 应用入口
+    if [ ! -f "${FE_DIR}/src/main.js" ]; then
+        cat > "${FE_DIR}/src/main.js" <<'JS'
+import { createApp } from 'vue'
+import App from './App.vue'
+
+createApp(App).mount('#app')
+JS
+    fi
+
+    # 4) src/App.vue：把你的 AppContent.vue 挂进来
+    if [ ! -f "${FE_DIR}/src/App.vue" ]; then
+        cat > "${FE_DIR}/src/App.vue" <<'VUE'
+<script setup>
+import AppContent from './AppContent.vue'
+</script>
+
+<template>
+  <AppContent />
+</template>
+VUE
+    fi
+
     # 构建
     cd "$FE_DIR"
     npm run build
