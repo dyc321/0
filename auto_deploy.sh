@@ -353,6 +353,12 @@ const filteredDevices = computed(() => {
     d.sims?.sim2?.number?.includes(text)
   )
 })
+const selectedSimNumbers = computed(() => {
+  if (selectedIds.value.size === 0) return []
+  return devices.value
+    .filter(d => selectedIds.value.has(d.id))
+    .map(d => simLine(d, smsSlot.value))
+})
 
 const onlineCount = computed(() => devices.value.filter(d => d.status === 'online').length)
 const offlineCount = computed(() => devices.value.filter(d => d.status !== 'online').length)
@@ -580,12 +586,24 @@ onMounted(() => loadDevices())
       </div>
       
       <div class="form-grid">
-        <div class="form-group">
-          <label>卡槽选择</label>
-          <select v-model="smsSlot" class="input select">
-            <option :value="1">SIM1 卡槽</option>
-            <option :value="2">SIM2 卡槽</option>
-          </select>
+<div class="form-group">
+  <label>卡槽选择</label>
+  <select v-model="smsSlot" class="input select">
+    <option :value="1">SIM1 卡槽</option>
+    <option :value="2">SIM2 卡槽</option>
+  </select>
+
+  <div v-if="selectedSimNumbers.length" style="margin-top:8px">
+    <label>当前卡槽对应的设备号码（SIM{{ smsSlot }}）</label>
+    <div class="input" style="background:#f8fafc; max-height:160px; overflow:auto">
+      <div v-for="(n, i) in selectedSimNumbers" :key="i">
+        {{ n }}
+      </div>
+    </div>
+  </div>
+</div>
+
+
         </div>
         
         <div class="form-group">
