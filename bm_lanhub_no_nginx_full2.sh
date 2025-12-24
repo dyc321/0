@@ -302,51 +302,27 @@ write_frontend(){
   "name": "board-lan-ui",
   "version": "1.0.0",
   "type": "module",
-  "scripts": {
-    "dev": "vite --host 0.0.0.0 --port ${UI_PORT}",
-    "build": "vite build"
-  },
-  "dependencies": {
-    "axios": "^1.6.0",
-    "vue": "^3.4.0"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-vue": "^5.0.0",
-    "vite": "^5.4.11"
-  }
+  "scripts": { "dev": "vite --host 0.0.0.0 --port ${UI_PORT}", "build": "vite build" },
+  "dependencies": { "axios": "^1.6.0", "vue": "^3.4.0" },
+  "devDependencies": { "@vitejs/plugin-vue": "^5.0.0", "vite": "^5.4.11" }
 }
 PKG
 
-  cat > "${FE}/vite.config.js" <<'JS'
+  cat > "${FE}/vite.config.js" <<JS
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
-  server: {
-    host: '0.0.0.0',
-    port: 5173,
-    proxy: {
-      '/api': 'http://127.0.0.1:8000'
-    }
-  },
+  server: { host: '0.0.0.0', port: ${UI_PORT}, proxy: { '/api': 'http://127.0.0.1:${API_PORT}' } },
   build: { outDir: 'dist' }
 })
 JS
-  sed -i "s/port: 5173/port: ${UI_PORT}/" "${FE}/vite.config.js"
-  sed -i "s/8000/${API_PORT}/" "${FE}/vite.config.js"
 
   cat > "${FE}/index.html" <<'HTML'
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>开发板管理系统</title>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1.0" /><title>开发板管理系统</title></head>
+  <body><div id="app"></div><script type="module" src="/src/main.js"></script></body>
 </html>
 HTML
 
@@ -361,9 +337,10 @@ JS
 import AppContent from './AppContent.vue'
 </script>
 <template><AppContent /></template>
+<style>body{margin:0;font-family:sans-serif}</style>
 VUE
 
-  # ============ 完整“炫酷 UI”（无全角空格版） ============
+  # ============ 包含“查看短信”功能的全新 UI ============
   cat > "${FE}/src/AppContent.vue" <<'VUECODE'
 <script setup>
 import { ref, onMounted, computed } from 'vue'
@@ -379,380 +356,168 @@ const smsSlot = ref(1)
 const selectedIds = ref(new Set())
 const searchText = ref('')
 
+// 查看短信相关变量
+const showHistory = ref(false)
+const historyList = ref([])
+const historyTitle = ref('')
+
 const filteredDevices = computed(() => {
   const t = searchText.value.trim().toLowerCase()
   if (!t) return devices.value
-  return devices.value.filter(d =>
-    (d.devId || '').toLowerCase().includes(t) ||
-    (d.ip || '').toLowerCase().includes(t) ||
-    (d.sims?.sim1?.number || '').includes(t) ||
-    (d.sims?.sim2?.number || '').includes(t)
-  )
+  return devices.value.filter(d => (d.devId||'').toLowerCase().includes(t) || (d.ip||'').includes(t))
 })
 
-const allSelected = computed(() =>
-  filteredDevices.value.length > 0 && selectedIds.value.size === filteredDevices.value.length
-)
-
-const onlineCount = computed(() => devices.value.filter(d => d.status === 'online').length)
-const offlineCount = computed(() => devices.value.filter(d => d.status !== 'online').length)
+const allSelected = computed(() => filteredDevices.value.length > 0 && selectedIds.value.size === filteredDevices.value.length)
 
 function toggleAll() {
   if (allSelected.value) selectedIds.value = new Set()
   else selectedIds.value = new Set(filteredDevices.value.map(d => d.id))
 }
-
 function toggleOne(id) {
   const s = new Set(selectedIds.value)
   s.has(id) ? s.delete(id) : s.add(id)
   selectedIds.value = s
 }
-
 function prettyTime(ts) {
   if (!ts) return '-'
-  return new Date(ts * 1000).toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
+  return new Date(ts * 1000).toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' })
 }
-
 function simLine(d, slot) {
   const sim = slot === 1 ? d?.sims?.sim1 : d?.sims?.sim2
   if (!sim) return '-'
-  const number = (sim.number || '').trim()
-  const op = (sim.operator || '').trim()
-  const label = (sim.label || '').trim()
-  if (number && op) return `${number} (${op})`
-  if (number) return number
-  if (label) return label
-  if (op) return op
-  return '-'
+  return (sim.number || sim.operator || '-')
 }
 
 async function loadDevices() {
-  loading.value = true
-  msg.value = ''
-  try {
-    const { data } = await api.get('/api/devices')
-    devices.value = Array.isArray(data) ? data : []
-  } catch (e) {
-    msg.value = '❌ ' + (e?.response?.data?.detail || e.message)
-  } finally {
-    loading.value = false
-  }
+  loading.value = true; msg.value = ''
+  try { const { data } = await api.get('/api/devices'); devices.value = Array.isArray(data) ? data : [] }
+  catch (e) { msg.value = '❌ ' + (e?.response?.data?.detail || e.message) }
+  finally { loading.value = false }
 }
-
-async function refreshAllStat() {
-  // 兼容：你之前 UI 有“一键刷新状态”，本版本后端不做逐台刷新，这里就复用扫描刷新
-  msg.value = '🔄 重新扫描更新设备...'
-  await startScanAdd()
-}
-
 async function startScanAdd() {
-  loading.value = true
-  msg.value = ''
-  try {
-    const { data } = await api.post('/api/scan/start')
-    msg.value = `🔍 扫描完成：found=${data.found} cidr=${data.cidr}`
-    await loadDevices()
-  } catch (e) {
-    msg.value = '❌ ' + (e?.response?.data?.detail || e.message)
-  } finally {
-    loading.value = false
-  }
+  loading.value = true; msg.value = '🔄 扫描中...'
+  try { const { data } = await api.post('/api/scan/start'); msg.value = `🔍 扫描完成`; await loadDevices() }
+  catch (e) { msg.value = '❌ ' + e.message }
+  finally { loading.value = false }
 }
-
 async function sendSms() {
   const ids = Array.from(selectedIds.value)
   if (ids.length === 0) return (msg.value = '⚠️ 请先选择设备')
-  if (!smsPhone.value.trim()) return (msg.value = '⚠️ 请输入接收号码')
-  if (!smsContent.value.trim()) return (msg.value = '⚠️ 请输入短信内容')
-
+  if (!smsPhone.value || !smsContent.value) return (msg.value = '⚠️ 请输入号码和内容')
   loading.value = true
-  msg.value = ''
   try {
-    const payload = {
-      deviceIds: ids,
-      phone: smsPhone.value.trim(),
-      content: smsContent.value.trim(),
-      slot: Number(smsSlot.value)
-    }
-    const { data } = await api.post('/api/sms/send', payload)
-    const ok = (data.results || []).filter(r => r.ok).length
-    const fail = (data.results || []).filter(r => !r.ok).length
-    msg.value = `✅ 成功 ${ok} 台，失败 ${fail} 台 (SIM${smsSlot.value})`
-  } catch (e) {
-    msg.value = '❌ ' + (e?.response?.data?.error || e?.response?.data?.detail || e.message)
-  } finally {
-    loading.value = false
-  }
+    const { data } = await api.post('/api/sms/send', { deviceIds: ids, phone: smsPhone.value, content: smsContent.value, slot: Number(smsSlot.value) })
+    msg.value = `✅ 发送结果: 成功 ${data.results.filter(r=>r.ok).length} 台`
+  } catch (e) { msg.value = '❌ ' + e.message }
+  finally { loading.value = false }
 }
 
+// === 核心：查看短信函数 ===
+async function viewSms(d) {
+  historyTitle.value = `${d.ip}`
+  historyList.value = []
+  showHistory.value = true
+  try {
+    const { data } = await api.post('/api/sms/query', { deviceId: d.id })
+    if(data.ok) {
+        historyList.value = data.data
+        if(data.data.length === 0) msg.value = "ℹ️ 该设备暂无短信记录"
+    } else {
+        alert("查询失败: " + data.error)
+    }
+  } catch(e) { alert("请求出错: " + e.message) }
+}
 onMounted(loadDevices)
 </script>
 
 <template>
   <div class="page">
-    <header class="header">
-      <div class="logo">
-        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-          <rect x="3" y="3" width="18" height="18" rx="2" stroke-width="2"/>
-          <path d="M3 9h18M9 3v18" stroke-width="2"/>
-        </svg>
-        <div>
-          <div class="title">开发板管理系统</div>
-          <div class="subtitle">绿邮 X系列双卡双待 4G 开发板 · 内网群控</div>
-        </div>
-      </div>
+    <div class="header">
+      <div class="title">开发板管理系统</div>
+      <button class="btn" @click="loadDevices">刷新列表</button>
+    </div>
+    
+    <div v-if="msg" class="toast">{{ msg }}</div>
 
-      <div class="header-actions">
-        <button class="btn btn-icon" :disabled="loading" @click="loadDevices" title="刷新列表">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.2"/>
-          </svg>
-        </button>
-      </div>
-    </header>
-
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-icon online">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M12 6v6l4 2"/>
-          </svg>
-        </div>
-        <div>
-          <div class="stat-value">{{ onlineCount }}</div>
-          <div class="stat-label">在线设备</div>
-        </div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-icon offline">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M15 9l-6 6M9 9l6 6"/>
-          </svg>
-        </div>
-        <div>
-          <div class="stat-value">{{ offlineCount }}</div>
-          <div class="stat-label">离线设备</div>
-        </div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-icon total">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
-            <circle cx="9" cy="7" r="4"/>
-            <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>
-          </svg>
-        </div>
-        <div>
-          <div class="stat-value">{{ devices.length }}</div>
-          <div class="stat-label">总设备数</div>
-        </div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-icon selected">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M9 11l3 3L22 4"/>
-            <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
-          </svg>
-        </div>
-        <div>
-          <div class="stat-value">{{ selectedIds.size }}</div>
-          <div class="stat-label">已选设备</div>
-        </div>
+    <div class="card">
+      <h3>群发短信</h3>
+      <div class="form">
+        <select v-model="smsSlot" class="input"><option :value="1">SIM1</option><option :value="2">SIM2</option></select>
+        <input v-model="smsPhone" class="input" placeholder="手机号" />
+        <input v-model="smsContent" class="input" placeholder="内容" style="flex:2" />
+        <button class="btn primary" :disabled="loading" @click="sendSms">发送 ({{selectedIds.size}})</button>
+        <button class="btn" @click="startScanAdd">扫描添加</button>
       </div>
     </div>
 
-    <transition name="fade">
-      <div v-if="msg" class="toast" :class="{ 'toast-error': msg.includes('❌') }">
-        {{ msg }}
-        <button class="toast-close" @click="msg = ''">×</button>
-      </div>
-    </transition>
-
-    <section class="card">
-      <div class="card-header">
-        <h2>📱 群发短信</h2>
-        <div class="card-actions">
-          <button class="btn btn-sm btn-secondary" :disabled="loading" @click="refreshAllStat">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 11-6.219-8.56"/>
-            </svg>
-            重新扫描
-          </button>
-          <button class="btn btn-sm btn-secondary" :disabled="loading" @click="startScanAdd">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="8"/>
-              <path d="M21 21l-4.35-4.35"/>
-            </svg>
-            扫描添加
-          </button>
-        </div>
-      </div>
-
-      <div class="form-grid">
-        <div class="form-group">
-          <label>卡槽选择</label>
-          <select v-model="smsSlot" class="input select">
-            <option :value="1">SIM1 卡槽</option>
-            <option :value="2">SIM2 卡槽</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label>接收号码</label>
-          <input v-model="smsPhone" class="input" placeholder="13800138000" />
-        </div>
-
-        <div class="form-group full-width">
-          <label>短信内容</label>
-          <textarea v-model="smsContent" class="input textarea" rows="3" placeholder="输入要发送的短信内容..."></textarea>
-        </div>
-
-        <div class="form-group full-width">
-          <button class="btn btn-primary btn-lg" :disabled="loading || selectedIds.size === 0" @click="sendSms">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
-            </svg>
-            发送短信 ({{ selectedIds.size }} 台设备)
-          </button>
-        </div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="card-header">
-        <h2>📡 设备列表</h2>
-        <div class="search-box">
-          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"/>
-            <path d="M21 21l-4.35-4.35"/>
-          </svg>
-          <input v-model="searchText" class="input search-input" placeholder="搜索设备ID、IP或号码..." />
-        </div>
-      </div>
-
+    <div class="card">
+      <h3>设备列表 ({{devices.length}}台)</h3>
       <div class="table-wrap">
         <table class="table">
-          <thead>
-            <tr>
-              <th style="width: 50px">
-                <input type="checkbox" :checked="allSelected" @change="toggleAll" />
-              </th>
-              <th style="width: 140px">设备ID</th>
-              <th style="width: 140px">IP地址</th>
-              <th style="width: 100px">状态</th>
-              <th>SIM1 卡槽</th>
-              <th>SIM2 卡槽</th>
-              <th style="width: 160px">最后在线</th>
-            </tr>
-          </thead>
+          <thead><tr>
+            <th><input type="checkbox" :checked="allSelected" @change="toggleAll" /></th>
+            <th>ID</th><th>IP</th><th>状态</th><th>SIM1</th><th>SIM2</th><th>时间</th><th>操作</th>
+          </tr></thead>
           <tbody>
-            <tr v-for="d in filteredDevices" :key="d.id" :class="{ 'row-selected': selectedIds.has(d.id) }">
+            <tr v-for="d in filteredDevices" :key="d.id">
               <td><input type="checkbox" :checked="selectedIds.has(d.id)" @change="toggleOne(d.id)" /></td>
-              <td class="mono">{{ d.devId }}</td>
-              <td class="mono">{{ d.ip }}</td>
-              <td>
-                <span class="badge" :class="d.status === 'online' ? 'badge-success' : 'badge-danger'">
-                  <span class="badge-dot"></span>
-                  {{ d.status === 'online' ? '在线' : '离线' }}
-                </span>
-              </td>
-              <td><div class="sim-info">📶 {{ simLine(d, 1) }}</div></td>
-              <td><div class="sim-info">📶 {{ simLine(d, 2) }}</div></td>
-              <td class="mono time">{{ prettyTime(d.lastSeen) }}</td>
-            </tr>
-            <tr v-if="filteredDevices.length === 0">
-              <td colspan="7" class="empty-state">
-                <p>{{ searchText ? '未找到匹配的设备' : '暂无设备数据（点“扫描添加”）' }}</p>
-              </td>
+              <td>{{ d.devId }}</td><td>{{ d.ip }}</td>
+              <td><span :class="['badge', d.status==='online'?'ok':'err']">{{ d.status }}</span></td>
+              <td>{{ simLine(d,1) }}</td><td>{{ simLine(d,2) }}</td>
+              <td>{{ prettyTime(d.lastSeen) }}</td>
+              <td><button class="btn sm" @click="viewSms(d)">查看短信</button></td>
             </tr>
           </tbody>
         </table>
       </div>
-    </section>
+    </div>
 
-    <footer class="footer">
-      <p>绿邮® X系列开发板管理系统</p>
-    </footer>
+    <div v-if="showHistory" class="modal-mask" @click.self="showHistory=false">
+      <div class="modal">
+        <div class="modal-head">
+            <h3>历史短信 ({{historyTitle}})</h3>
+            <button class="close-btn" @click="showHistory=false">×</button>
+        </div>
+        <div class="sms-list">
+            <div v-if="historyList.length===0" style="padding:20px;text-align:center;color:#999">暂无记录</div>
+            <div v-for="(item,i) in historyList" :key="i" class="sms-item">
+                <div class="sms-meta">
+                    <span class="sms-phone">来自: {{item.phone}}</span>
+                    <span class="sms-time">{{item.time}}</span>
+                </div>
+                <div class="sms-body">{{item.content}}</div>
+            </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
 <style scoped>
-*{box-sizing:border-box}
-.page{min-height:100vh;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
-.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
-.logo{display:flex;align-items:center;gap:16px}
-.logo-icon{width:48px;height:48px;color:#fff;filter:drop-shadow(0 4px 6px rgba(0,0,0,.1))}
-.title{font-size:28px;font-weight:800;color:#fff;text-shadow:0 2px 4px rgba(0,0,0,.1)}
-.subtitle{font-size:13px;color:rgba(255,255,255,.9);margin-top:4px}
-.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border:none;border-radius:12px;font-weight:600;font-size:14px;cursor:pointer;transition:all .2s;background:#fff;color:#334155;box-shadow:0 2px 8px rgba(0,0,0,.1)}
-.btn:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.15)}
-.btn:disabled{opacity:.6;cursor:not-allowed}
-.btn svg{width:18px;height:18px}
-.btn-icon{padding:10px;background:rgba(255,255,255,.2);color:#fff;backdrop-filter:blur(10px)}
-.btn-primary{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff}
-.btn-secondary{background:#f1f5f9;color:#475569}
-.btn-sm{padding:8px 14px;font-size:13px}
-.btn-lg{padding:14px 28px;font-size:16px;width:100%}
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-bottom:24px}
-.stat-card{background:#fff;border-radius:16px;padding:20px;display:flex;align-items:center;gap:16px;box-shadow:0 4px 12px rgba(0,0,0,.08);transition:transform .2s}
-.stat-card:hover{transform:translateY(-4px)}
-.stat-icon{width:56px;height:56px;border-radius:12px;display:flex;align-items:center;justify-content:center}
-.stat-icon svg{width:28px;height:28px;color:#fff}
-.stat-icon.online{background:linear-gradient(135deg,#10b981 0%,#059669 100%)}
-.stat-icon.offline{background:linear-gradient(135deg,#ef4444 0%,#dc2626 100%)}
-.stat-icon.total{background:linear-gradient(135deg,#3b82f6 0%,#2563eb 100%)}
-.stat-icon.selected{background:linear-gradient(135deg,#8b5cf6 0%,#7c3aed 100%)}
-.stat-value{font-size:32px;font-weight:800;color:#0f172a;line-height:1}
-.stat-label{font-size:13px;color:#64748b;margin-top:4px}
-.toast{background:#fff;border-left:4px solid #10b981;border-radius:12px;padding:14px 18px;margin-bottom:24px;box-shadow:0 4px 12px rgba(0,0,0,.1);display:flex;justify-content:space-between;align-items:center}
-.toast-error{border-left-color:#ef4444}
-.toast-close{background:none;border:none;font-size:24px;color:#64748b;cursor:pointer}
-.fade-enter-active,.fade-leave-active{transition:all .3s}
-.fade-enter-from,.fade-leave-to{opacity:0;transform:translateY(-10px)}
-.card{background:#fff;border-radius:20px;padding:24px;margin-bottom:24px;box-shadow:0 4px 16px rgba(0,0,0,.08)}
-.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:16px}
-.card-header h2{font-size:20px;font-weight:800;color:#0f172a;margin:0}
-.card-actions{display:flex;gap:10px}
-.form-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
-.form-group{display:flex;flex-direction:column;gap:8px}
-.form-group.full-width{grid-column:1/-1}
-.form-group label{font-size:13px;font-weight:700;color:#334155}
-.input{padding:12px 16px;border:2px solid #e2e8f0;border-radius:10px;font-size:14px;transition:all .2s;outline:none}
-.input:focus{border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,.1)}
-.textarea{resize:vertical;font-family:inherit}
-.search-box{position:relative;width:300px}
-.search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:18px;height:18px;color:#94a3b8;pointer-events:none}
-.search-input{padding-left:40px;width:100%}
-.table-wrap{overflow-x:auto;border-radius:12px;border:1px solid #e2e8f0}
-.table{width:100%;border-collapse:collapse;min-width:900px}
-.table thead th{background:#f8fafc;padding:14px 16px;text-align:left;font-size:12px;font-weight:700;color:#475569;text-transform:uppercase;border-bottom:2px solid #e2e8f0}
-.table tbody td{padding:16px;border-bottom:1px solid #f1f5f9;font-size:14px;color:#334155}
-.table tbody tr:hover{background:#f8fafc}
-.table tbody tr.row-selected{background:#ede9fe}
-.mono{font-family:ui-monospace,monospace;font-size:13px}
-.badge{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:700}
-.badge-success{background:rgba(16,185,129,.1);color:#065f46}
-.badge-danger{background:rgba(239,68,68,.1);color:#7f1d1d}
-.badge-dot{width:8px;height:8px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.sim-info{display:flex;align-items:center;gap:8px}
-.empty-state{text-align:center;padding:48px 20px !important;color:#94a3b8}
-.footer{text-align:center;color:rgba(255,255,255,.8);font-size:13px;margin-top:24px}
-@media (max-width:768px){
-  .stats-grid{grid-template-columns:repeat(2,1fr)}
-  .form-grid{grid-template-columns:1fr}
-  .search-box{width:100%}
-}
+.page{padding:20px;background:#f0f2f5;min-height:100vh;font-family:sans-serif}
+.header{display:flex;justify-content:space-between;margin-bottom:20px}
+.title{font-size:24px;font-weight:bold;color:#333}
+.card{background:#fff;padding:20px;border-radius:8px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.05)}
+.form{display:flex;gap:10px;flex-wrap:wrap}
+.input{padding:8px;border:1px solid #ddd;border-radius:4px}
+.btn{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;background:#fff;border:1px solid #ddd}
+.btn.primary{background:#1890ff;color:#fff;border:none}
+.btn.sm{padding:4px 8px;font-size:12px;background:#e6f7ff;color:#1890ff;border:1px solid #91d5ff}
+.table{width:100%;border-collapse:collapse}
+.table th,.table td{padding:12px;text-align:left;border-bottom:1px solid #eee}
+.badge{padding:2px 8px;border-radius:10px;font-size:12px;color:#fff}
+.badge.ok{background:#52c41a} .badge.err{background:#ff4d4f}
+.toast{position:fixed;top:20px;right:20px;background:#fff;padding:10px 20px;box-shadow:0 4px 12px rgba(0,0,0,.15);border-radius:4px;z-index:999}
+/* 弹窗样式 */
+.modal-mask{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;justify-content:center;align-items:center;z-index:1000}
+.modal{background:#fff;width:600px;max-width:90%;max-height:80vh;border-radius:8px;display:flex;flex-direction:column}
+.modal-head{padding:15px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center}
+.close-btn{background:none;border:none;font-size:24px;cursor:pointer}
+.sms-list{overflow-y:auto;padding:15px}
+.sms-item{border-bottom:1px solid #f0f0f0;padding:10px 0}
+.sms-meta{display:flex;justify-content:space-between;font-size:12px;color:#999;margin-bottom:4px}
+.sms-body{font-size:14px;color:#333;line-height:1.5}
 </style>
 VUECODE
 
@@ -764,7 +529,7 @@ VUECODE
 
   cat > "${SERVICE_UI}" <<EOF
 [Unit]
-Description=Board LAN Hub UI (Vite Dev Server)
+Description=Board LAN Hub UI
 After=network.target
 
 [Service]
@@ -780,7 +545,7 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now board-ui
-  log_info "前端 OK：0.0.0.0:${UI_PORT}（/api 已代理到 127.0.0.1:${API_PORT}）"
+  log_info "前端 OK：0.0.0.0:${UI_PORT}"
 }
 
 show_status(){
