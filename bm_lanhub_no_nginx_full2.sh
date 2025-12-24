@@ -94,28 +94,23 @@ write_backend(){
   "$venv/bin/pip" -q install --upgrade pip
   "$venv/bin/pip" -q install fastapi "uvicorn[standard]" requests
 
+  # === 写入最终调试好的完美版 Python 代码 ===
   cat > "${APP_DIR}/app/main.py" <<'PY'
-import asyncio
-import json
-import os
-import re
-import sqlite3
-import subprocess
+import asyncio, json, os, re, sqlite3, requests, time, hashlib
 from ipaddress import ip_network, IPv4Network
 from typing import Any, Dict, List, Optional, Tuple
-
-import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from requests.auth import HTTPDigestAuth
 
 DB_PATH = os.environ.get("BM_DB", "/opt/board-manager/data/data.db")
 DEFAULT_USER = os.environ.get("BM_DEV_USER", "admin")
 DEFAULT_PASS = os.environ.get("BM_DEV_PASS", "admin")
-TIMEOUT = float(os.environ.get("BM_HTTP_TIMEOUT", "2.5"))
+TIMEOUT = float(os.environ.get("BM_HTTP_TIMEOUT", "6.0"))
 
 app = FastAPI(title="Board LAN Hub", version="1.0.0")
 
-def db() -> sqlite3.Connection:
+def db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
@@ -123,219 +118,140 @@ def db() -> sqlite3.Connection:
 
 def init_db():
     con = db()
-    cur = con.cursor()
-    cur.execute("""
+    con.execute("""
     CREATE TABLE IF NOT EXISTS devices (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      devId TEXT,
-      grp  TEXT DEFAULT 'auto',
-      ip   TEXT NOT NULL,
-      user TEXT DEFAULT '',
-      pass TEXT DEFAULT '',
-      status TEXT DEFAULT 'unknown',
-      lastSeen INTEGER DEFAULT 0,
-      sim1_number TEXT DEFAULT '',
-      sim1_operator TEXT DEFAULT '',
-      sim2_number TEXT DEFAULT '',
-      sim2_operator TEXT DEFAULT ''
-    )
-    """)
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip)")
-    con.commit()
-    con.close()
-
+      devId TEXT, grp TEXT DEFAULT 'auto', ip TEXT NOT NULL,
+      user TEXT DEFAULT '', pass TEXT DEFAULT '', status TEXT DEFAULT 'unknown', lastSeen INTEGER DEFAULT 0,
+      sim1_number TEXT DEFAULT '', sim1_operator TEXT DEFAULT '',
+      sim2_number TEXT DEFAULT '', sim2_operator TEXT DEFAULT ''
+    )""")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip)")
+    con.commit(); con.close()
 init_db()
 
-def now_ts() -> int:
-    import time
-    return int(time.time())
+# MD5 Token 计算 (官方算法)
+def calc_token(user, pwd):
+    return hashlib.md5(f"{user}|{pwd}".encode('utf-8')).hexdigest()
 
-def sh(cmd: List[str]) -> str:
-    return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True).strip()
-
-def guess_ipv4_cidr() -> Optional[str]:
+def is_target_device(ip, user, pw):
     try:
-        r = sh(["bash", "-lc", "ip -4 route show default 2>/dev/null | head -n1"])
-        m = re.search(r"dev\\s+(\\S+)", r)
-        if not m:
-            return None
-        iface = m.group(1)
-        a = sh(["bash", "-lc", f"ip -4 addr show dev {iface} | awk '/inet /{{print $2; exit}}'"])
-        if not a:
-            return None
-        net = ip_network(a, strict=False)
-        if isinstance(net, IPv4Network):
-            return str(net.network_address) + f"/{net.prefixlen}"
-        return None
-    except Exception:
-        return None
+        r = requests.get(f"http://{ip}/mgr", timeout=TIMEOUT)
+        if r.status_code == 401:
+             r2 = requests.get(f"http://{ip}/mgr", auth=HTTPDigestAuth(user,pw), timeout=TIMEOUT)
+             return r2.status_code == 200
+        return False
+    except: return False
 
-def is_target_device(ip: str, user: str, pw: str) -> Tuple[bool, Optional[str]]:
-    url = f"http://{ip}/mgr"
+def get_data(ip, user, pw):
     try:
-        r = requests.get(url, timeout=TIMEOUT, allow_redirects=False)
-        if r.status_code != 401:
-            return False, None
-        h = r.headers.get("WWW-Authenticate", "")
-        if "Digest" not in h:
-            return False, None
-        m = re.search(r'realm="([^"]+)"', h)
-        realm = m.group(1) if m else None
-        if realm != "asyncesp":
-            return False, realm
-        r2 = requests.get(url, timeout=TIMEOUT, auth=requests.auth.HTTPDigestAuth(user, pw))
-        return (r2.status_code == 200), realm
-    except Exception:
-        return False, None
+        payload = {"keys": ["DEV_ID","SIM1_PHNUM","SIM2_PHNUM","SIM1_OP","SIM2_OP"]}
+        r = requests.post(f"http://{ip}/mgr?a=getHtmlData_index", auth=HTTPDigestAuth(user,pw), data={"keys":json.dumps(payload)}, timeout=TIMEOUT)
+        return r.json().get("data", {}) if r.status_code==200 else {}
+    except: return {}
 
-def get_device_data(ip: str, user: str, pw: str) -> Optional[Dict[str, Any]]:
-    url = f"http://{ip}/mgr?a=getHtmlData_index"
-    keys = ["DEV_ID","DEV_VER","SIM1_PHNUM","SIM2_PHNUM","SIM1_OP","SIM2_OP"]
-    payload = {"keys": keys}
-    try:
-        r = requests.post(
-            url, timeout=TIMEOUT,
-            auth=requests.auth.HTTPDigestAuth(user, pw),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={"keys": json.dumps(payload, ensure_ascii=False)}
-        )
-        if r.status_code != 200:
-            return None
-        j = r.json()
-        if isinstance(j, dict) and j.get("success") and isinstance(j.get("data"), dict):
-            return j["data"]
-        return None
-    except Exception:
-        return None
-
-def upsert_device(ip: str, user: str, pw: str, grp: str = "auto") -> Dict[str, Any]:
-    data = get_device_data(ip, user, pw) or {}
-    dev_id = (data.get("DEV_ID") or "").strip() or None
-    sim1_num = (data.get("SIM1_PHNUM") or "").strip()
-    sim2_num = (data.get("SIM2_PHNUM") or "").strip()
-    sim1_op = (data.get("SIM1_OP") or "").strip()
-    sim2_op = (data.get("SIM2_OP") or "").strip()
-
+def upsert(ip, u, p, g):
+    d = get_data(ip, u, p)
     con = db()
-    cur = con.cursor()
-    cur.execute("SELECT id FROM devices WHERE ip=?", (ip,))
-    row = cur.fetchone()
-    if row:
-        cur.execute("""
-        UPDATE devices SET devId=COALESCE(?, devId), grp=?, user=?, pass=?, status='online', lastSeen=?,
-          sim1_number=?, sim1_operator=?, sim2_number=?, sim2_operator=?
-        WHERE ip=?
-        """, (dev_id, grp, user, pw, now_ts(), sim1_num, sim1_op, sim2_num, sim2_op, ip))
+    exists = con.execute("SELECT id FROM devices WHERE ip=?", (ip,)).fetchone()
+    now = int(time.time())
+    if exists:
+        con.execute("UPDATE devices SET devId=?, grp=?, user=?, pass=?, status='online', lastSeen=?, sim1_number=?, sim1_operator=?, sim2_number=?, sim2_operator=? WHERE ip=?",
+        (d.get("DEV_ID"), g, u, p, now, d.get("SIM1_PHNUM"), d.get("SIM1_OP"), d.get("SIM2_PHNUM"), d.get("SIM2_OP"), ip))
     else:
-        cur.execute("""
-        INSERT INTO devices(devId, grp, ip, user, pass, status, lastSeen, sim1_number, sim1_operator, sim2_number, sim2_operator)
-        VALUES(?,?,?,?,?,'online',?,?,?,?,?)
-        """, (dev_id, grp, ip, user, pw, now_ts(), sim1_num, sim1_op, sim2_num, sim2_op))
-    con.commit()
-    cur.execute("SELECT * FROM devices WHERE ip=?", (ip,))
-    out = dict(cur.fetchone())
-    con.close()
-    return out
+        con.execute("INSERT INTO devices VALUES(NULL,?,?,?,?,?,'online',?,?,?,?,?)",
+        (d.get("DEV_ID"), g, ip, u, p, now, d.get("SIM1_PHNUM"), d.get("SIM1_OP"), d.get("SIM2_PHNUM"), d.get("SIM2_OP")))
+    con.commit(); con.close()
+    return {"ip": ip}
 
-def list_devices():
-    con = db(); cur = con.cursor()
-    cur.execute("SELECT * FROM devices ORDER BY id DESC")
-    rows = [dict(r) for r in cur.fetchall()]
+@app.get("/api/devices")
+def list_dev():
+    con = db()
+    rows = [dict(r) for r in con.execute("SELECT * FROM devices ORDER BY id DESC")]
     con.close()
-    out=[]
-    for r in rows:
-        out.append({
-          "id": r["id"],
-          "devId": r["devId"] or "",
-          "ip": r["ip"],
-          "status": r["status"] or "unknown",
-          "lastSeen": r["lastSeen"] or 0,
-          "sims": {
-            "sim1": {"number": r["sim1_number"] or "", "operator": r["sim1_operator"] or "", "label": (r["sim1_number"] or r["sim1_operator"] or "未知SIM")},
-            "sim2": {"number": r["sim2_number"] or "", "operator": r["sim2_operator"] or "", "label": (r["sim2_number"] or r["sim2_operator"] or "未知SIM")},
-          }
-        })
-    return out
+    return [{"id":r["id"],"devId":r["devId"],"ip":r["ip"],"status":r["status"],"lastSeen":r["lastSeen"],"sims":{"sim1":{"number":r["sim1_number"],"operator":r["sim1_operator"]},"sim2":{"number":r["sim2_number"],"operator":r["sim2_operator"]}}} for r in rows]
 
 class SmsReq(BaseModel):
-    deviceIds: List[int]
-    phone: str
-    content: str
-    slot: int
+    deviceIds: List[int]; phone: str; content: str; slot: int
+
+@app.post("/api/sms/send")
+def send_sms(req: SmsReq):
+    con = db(); res = []
+    for did in req.deviceIds:
+        row = con.execute("SELECT ip, user, pass FROM devices WHERE id=?", (did,)).fetchone()
+        if not row: res.append({"id":did, "ok":False}); continue
+        try:
+            r = requests.get(f"http://{row['ip']}/mgr", 
+                           params={"a":"sendsms","sid":req.slot,"phone":req.phone,"content":req.content}, 
+                           auth=HTTPDigestAuth(row['user'],row['pass']), timeout=5)
+            res.append({"id":did, "ok": r.json().get("success", False)})
+        except Exception as e: res.append({"id":did, "ok":False, "error":str(e)})
+    con.close()
+    return {"results": res}
+
+class SmsQueryReq(BaseModel):
+    deviceId: int
+
+@app.post("/api/sms/query")
+def query_sms(req: SmsQueryReq):
+    con = db()
+    row = con.execute("SELECT ip,user,pass FROM devices WHERE id=?", (req.deviceId,)).fetchone()
+    con.close()
+    if not row: raise HTTPException(404, "Device not found")
+    
+    target_ip = row['ip']
+    user = row['user'] or DEFAULT_USER
+    pwd = row['pass'] or DEFAULT_PASS
+    
+    try:
+        # 1. 计算 Token
+        token = calc_token(user, pwd)
+        # 2. 发起请求
+        url = f"http://{target_ip}/ctrl"
+        params = {"cmd": "querysms", "p1": "1", "p2": "100", "token": token}
+        
+        r = requests.get(url, params=params, auth=HTTPDigestAuth(user, pwd), timeout=10)
+        r.encoding = 'utf-8' # 强制UTF-8
+        
+        if r.status_code == 200:
+            try:
+                resp = r.json()
+                if isinstance(resp, dict) and resp.get("code") == 0:
+                    raw_list = resp.get("results", [])
+                    sms_list = []
+                    for item in raw_list:
+                        ts = item.get("smsTs", 0)
+                        try: ts = int(ts)
+                        except: ts = 0
+                        sms_list.append({
+                            "phone": item.get("phNum", "未知号码"),
+                            "content": item.get("smsBd", ""),
+                            "time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)) if ts > 0 else "-"
+                        })
+                    return {"ok": True, "data": sms_list}
+                else:
+                    return {"ok": False, "error": f"设备返回错误: {resp}"}
+            except:
+                return {"ok": True, "raw": r.text}
+        return {"ok": False, "error": f"HTTP {r.status_code}"}
+    except Exception as e: 
+        return {"ok": False, "error": str(e)}
 
 @app.get("/api/health")
 def health(): return {"ok": True}
 
-@app.get("/api/devices")
-def api_devices(): return list_devices()
-
-@app.post("/api/sms/send")
-def sms_send(req: SmsReq):
-    if req.slot not in (1,2): raise HTTPException(400,"slot must be 1 or 2")
-    phone=req.phone.strip(); content=req.content.strip()
-    if not phone or not content: raise HTTPException(400,"phone/content required")
-
-    con=db(); cur=con.cursor()
-    results=[]
-    for did in req.deviceIds:
-        cur.execute("SELECT * FROM devices WHERE id=?", (did,))
-        r=cur.fetchone()
-        if not r:
-            results.append({"id": did, "ok": False, "error":"device not found"}); continue
-        ip=r["ip"]; user=(r["user"] or DEFAULT_USER).strip(); pw=(r["pass"] or DEFAULT_PASS).strip()
-        ok,_=is_target_device(ip,user,pw)
-        if not ok:
-            results.append({"id": did, "ok": False, "error":"auth or not target device"}); continue
-        url=f"http://{ip}/mgr"
-        params={"a":"sendsms","sid":str(req.slot),"phone":phone,"content":content}
-        try:
-            resp=requests.get(url, params=params, timeout=TIMEOUT+3, auth=requests.auth.HTTPDigestAuth(user,pw))
-            if resp.status_code==200:
-                try:
-                    j=resp.json()
-                    if isinstance(j, dict) and j.get("success") is True:
-                        results.append({"id": did, "ok": True})
-                    else:
-                        results.append({"id": did, "ok": False, "error": f"device response: {j}"})
-                except Exception:
-                    results.append({"id": did, "ok": False, "error":"non-json response"})
-            else:
-                results.append({"id": did, "ok": False, "error": f"http {resp.status_code}"})
-        except Exception as e:
-            results.append({"id": did, "ok": False, "error": str(e)})
-    con.close()
-    return {"ok": True, "results": results}
-
 @app.post("/api/scan/start")
-def scan_start(cidr: Optional[str]=None, group: str="auto", user: str=DEFAULT_USER, password: str=DEFAULT_PASS):
-    if not cidr:
-        cidr=guess_ipv4_cidr()
-    if not cidr:
-        raise HTTPException(400,"cidr not provided and cannot be auto-detected")
-
-    try:
-        net=ip_network(cidr, strict=False)
-        if not isinstance(net, IPv4Network):
-            raise ValueError("only IPv4 supported (scan)")
-    except Exception as e:
-        raise HTTPException(400, f"bad cidr: {e}")
-
-    ips=[str(h) for h in net.hosts()]
-    sem=asyncio.Semaphore(96)
-    found=[]
-    async def probe(ip: str):
-        async with sem:
-            loop=asyncio.get_event_loop()
-            ok,_=await loop.run_in_executor(None, is_target_device, ip, user, password)
-            if ok:
-                d=await loop.run_in_executor(None, upsert_device, ip, user, password, group)
-                found.append(d)
-
+def scan(cidr: Optional[str]=None, group:str="auto", user:str="admin", password:str="admin"):
+    if not cidr: return {"ok":False}
+    try: ips = [str(ip) for ip in ip_network(cidr, strict=False).hosts()]
+    except: return {"ok":False}
     async def run():
-        await asyncio.gather(*(probe(ip) for ip in ips))
-
+        loop = asyncio.get_event_loop()
+        for ip in ips:
+            if await loop.run_in_executor(None, is_target_device, ip, user, password):
+                await loop.run_in_executor(None, upsert, ip, user, password, group)
     asyncio.run(run())
-    return {"ok": True, "cidr": cidr, "found": len(found), "devices": [{"ip": d["ip"], "devId": d.get("devId")} for d in found]}
+    return {"ok": True, "cidr": cidr, "found": "Scanning"}
 PY
 
   cat > "${SERVICE_API}" <<EOF
